@@ -1,6 +1,6 @@
 use poise::serenity_prelude as serenity;
-use std::process::{Command, Stdio};
 use std::io::Write;
+use std::process::{Command, Stdio};
 
 struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -20,7 +20,20 @@ async fn typst(
     ctx: Context<'_>,
     #[description = "Typst code"] code: Option<String>,
 ) -> Result<(), Error> {
-    let code = format!("{}\n{}", PAGE_FRONTMATTER, code.unwrap_or_else(|| todo!()));
+    let referenced_message = match ctx {
+        poise::Context::Prefix(prefix_ctx) => prefix_ctx.msg.referenced_message.as_deref(),
+        poise::Context::Application(_) => None,
+    };
+
+    let code = match code {
+        Some(code) => code,
+        // fall back to the replied-to message's content
+        None => referenced_message
+            .map(|m| m.content.clone())
+            .ok_or("no code provided and no referenced message")?,
+    };
+
+    let code = format!("{PAGE_FRONTMATTER}\n{code}");
 
     let image_bytes = compile_typst(&code)?;
     let attachment = serenity::CreateAttachment::bytes(image_bytes, "output.png");
@@ -52,8 +65,7 @@ fn compile_typst(code: &str) -> Result<Vec<u8>, Error> {
         .unwrap()
         .write_all(code.as_bytes())?;
 
-    let output = compile_child
-        .wait_with_output()?;
+    let output = compile_child.wait_with_output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -67,7 +79,8 @@ fn compile_typst(code: &str) -> Result<Vec<u8>, Error> {
 async fn main() {
     dotenvy::dotenv().expect("Failed to read .env file");
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
-    let intents = serenity::GatewayIntents::non_privileged();
+    let intents =
+        serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -82,6 +95,8 @@ async fn main() {
                     serenity::GuildId::new(1208241314110513162),
                 )
                 .await?;
+                poise::builtins::register_globally(ctx, &Vec::<poise::Command<Data, Error>>::new())
+                    .await?;
                 Ok(Data {})
             })
         })
