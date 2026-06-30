@@ -1,5 +1,6 @@
 use poise::serenity_prelude as serenity;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::io::Write;
 
 struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -11,17 +12,7 @@ const PAGE_FRONTMATTER: &str = "#set page(
   margin: 0.3cm,
 )";
 
-/// Displays a user's account creation date
-#[poise::command(slash_command, prefix_command)]
-async fn age(
-    ctx: Context<'_>,
-    #[description = "Selected user"] user: Option<serenity::User>,
-) -> Result<(), Error> {
-    let u = user.as_ref().unwrap_or_else(|| ctx.author());
-    let response = format!("{}'s account was created at {}", u.name, u.created_at());
-    ctx.say(response).await?;
-    Ok(())
-}
+// TODO use typst rust library
 
 /// Renders a user's typst markup
 #[poise::command(slash_command, prefix_command)]
@@ -30,31 +21,46 @@ async fn typst(
     #[description = "Typst code"] code: Option<String>,
 ) -> Result<(), Error> {
     let code = format!("{}\n{}", PAGE_FRONTMATTER, code.unwrap_or_else(|| todo!()));
-    let image_path = "/tmp/discord_typst.png";
 
-    let _ = compile_typst(&code, image_path);
-    let attachment = serenity::CreateAttachment::path(image_path).await.unwrap();
+    let image_bytes = compile_typst(&code)?;
+    let attachment = serenity::CreateAttachment::bytes(image_bytes, "output.png");
     let reply = poise::CreateReply::default().attachment(attachment);
     ctx.send(reply).await?;
 
     Ok(())
 }
 
-fn compile_typst(code: &str, image_path: &str) -> Result<(), Error> {
-    let code_path = "/tmp/discord_typst.typst";
-    std::fs::write(code_path, code)?;
-
+fn compile_typst(code: &str) -> Result<Vec<u8>, Error> {
     // TODO verify typst exists on sys (only on err)?
 
-    let cmd_res = Command::new("typst")
+    let mut compile_child = Command::new("typst")
         .arg("compile")
-        .arg(code_path)
-        .arg(image_path)
-        .output()
-        .expect("failed to execute process");
+        .arg("-f")
+        .arg("png")
+        .arg("--ppi")
+        .arg("300")
+        .arg("-")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
 
-    dbg!(cmd_res); //TODO remove
-    Ok(())
+    compile_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(code.as_bytes())?;
+
+    let output = compile_child
+        .wait_with_output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("typst compile failed:\n{stderr}").into());
+    }
+
+    Ok(output.stdout)
 }
 
 #[tokio::main]
@@ -65,12 +71,17 @@ async fn main() {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![age(), typst()],
+            commands: vec![typst()],
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
-                poise::builtins::register_in_guild(ctx, &framework.options().commands, serenity::GuildId::new(1208241314110513162)).await?;
+                poise::builtins::register_in_guild(
+                    ctx,
+                    &framework.options().commands,
+                    serenity::GuildId::new(1208241314110513162),
+                )
+                .await?;
                 Ok(Data {})
             })
         })
