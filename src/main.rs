@@ -1,6 +1,4 @@
 use poise::serenity_prelude as serenity;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -11,8 +9,6 @@ const PAGE_FRONTMATTER: &str = "#set page(
   height: auto,
   margin: 0.3cm,
 )";
-
-// TODO use typst rust library
 
 /// Renders a user's typst markup
 #[poise::command(slash_command)]
@@ -51,35 +47,27 @@ async fn render_and_send(ctx: Context<'_>, code: &str) -> Result<(), Error> {
 }
 
 fn compile_typst(code: &str) -> Result<Vec<u8>, Error> {
-    // TODO verify typst exists on sys (only on err)?
+    let template = typst_as_lib::TypstEngine::builder()
+        .main_file(code)
+        .fonts(typst_assets::fonts())
+        .build();
 
-    let mut compile_child = Command::new("typst")
-        .arg("compile")
-        .arg("-f")
-        .arg("png")
-        .arg("--ppi")
-        .arg("300")
-        .arg("-")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let doc: typst_layout::PagedDocument = template.compile().output?;
 
-    compile_child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(code.as_bytes())?;
+    let page = doc.pages().first().ok_or("typst produced no pages")?;
+    let ppi = 300.0;
+    let pixel_per_pt = typst_utils::Scalar::new(ppi / 72.0);
+    let render_options = typst_render::RenderOptions {
+        pixel_per_pt,
+        render_bleed: false,
+    };
+    let pixmap = typst_render::render(page, &render_options);
 
-    let output = compile_child.wait_with_output()?;
+    let png = pixmap
+        .encode_png()
+        .map_err(|e| format!("png encode failed: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("typst compile failed:\n{stderr}").into());
-    }
-
-    Ok(output.stdout)
+    Ok(png)
 }
 
 #[tokio::main]
