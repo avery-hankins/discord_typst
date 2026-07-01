@@ -11,7 +11,12 @@ const PAGE_FRONTMATTER: &str = "#set page(
 )";
 
 /// Renders a user's typst markup
-#[poise::command(slash_command, rename = "rendertypst")]
+#[poise::command(
+    slash_command,
+    rename = "rendertypst",
+    install_context = "User",
+    interaction_context = "Guild | PrivateChannel",
+)]
 async fn typst_slash(
     ctx: Context<'_>,
     #[description = "Typst code"] code: String,
@@ -20,7 +25,11 @@ async fn typst_slash(
 }
 
 /// Renders a message's typst markup
-#[poise::command(context_menu_command = "Render Typst")]
+#[poise::command(
+    context_menu_command = "Render Typst",
+    install_context = "User",
+    interaction_context = "Guild | PrivateChannel",
+)]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
     let content = msg.content.trim();
 
@@ -103,8 +112,7 @@ fn compile_typst(code: &str) -> Result<Vec<u8>, Error> {
 async fn main() {
     dotenvy::dotenv().expect("Failed to read .env file");
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
-    let intents =
-        serenity::GatewayIntents::non_privileged();
+    let intents = serenity::GatewayIntents::non_privileged();
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
