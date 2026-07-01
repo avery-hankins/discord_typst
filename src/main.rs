@@ -15,24 +15,31 @@ const PAGE_FRONTMATTER: &str = "#set page(
 // TODO use typst rust library
 
 /// Renders a user's typst markup
-#[poise::command(slash_command, prefix_command)]
-async fn typst(
+#[poise::command(slash_command)]
+async fn typst_slash(
     ctx: Context<'_>,
-    #[description = "Typst code"] code: Option<String>,
+    #[description = "Typst code"] code: String,
 ) -> Result<(), Error> {
-    let referenced_message = match ctx {
-        poise::Context::Prefix(prefix_ctx) => prefix_ctx.msg.referenced_message.as_deref(),
-        poise::Context::Application(_) => None,
-    };
+    render_and_send(ctx, &code).await
+}
 
-    let code = match code {
-        Some(code) => code,
-        // fall back to the replied-to message's content
-        None => referenced_message
-            .map(|m| m.content.clone())
-            .ok_or("no code provided and no referenced message")?,
-    };
+/// Renders a message's typst markup
+#[poise::command(context_menu_command = "Render Typst")]
+async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
+    let mut code: &str = &msg.content;
 
+    // check if message is markdown code block
+    if &code[0..3] == "```" && &code[code.len() - 3..] == "```" {
+        // strip first line
+        code = code.split_once('\n').unwrap().1;
+        // strip last three characters
+        code = &code[0..code.len() - 3];
+    }
+
+    render_and_send(ctx, code).await
+}
+
+async fn render_and_send(ctx: Context<'_>, code: &str) -> Result<(), Error> {
     let code = format!("{PAGE_FRONTMATTER}\n{code}");
 
     let image_bytes = compile_typst(&code)?;
@@ -84,7 +91,7 @@ async fn main() {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![typst()],
+            commands: vec![typst_slash(), typst_msg()],
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {
