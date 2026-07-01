@@ -22,15 +22,17 @@ async fn typst_slash(
 /// Renders a message's typst markup
 #[poise::command(context_menu_command = "Render Typst")]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
-    let mut code: &str = &msg.content;
+    let content = msg.content.trim();
 
-    // check if message is markdown code block
-    if &code[0..3] == "```" && &code[code.len() - 3..] == "```" {
-        // strip first line
-        code = code.split_once('\n').unwrap().1;
-        // strip last three characters
-        code = &code[0..code.len() - 3];
-    }
+    // If the message is a ```markdown code block```, strip all non-content (including language).
+    let code = content
+        .strip_prefix("```")
+        .and_then(|s| s.strip_suffix("```"))
+        .map(|inner| match inner.split_once('\n') {
+            Some((_first_line, rest)) => rest,
+            None => inner,
+        })
+        .unwrap_or(content);
 
     render_and_send(ctx, code).await
 }
