@@ -23,23 +23,67 @@ struct TypstModal {
     slash_command,
     rename = "rendertypst",
     install_context = "Guild | User",
-    interaction_context = "Guild | PrivateChannel",
+    interaction_context = "Guild | PrivateChannel"
 )]
-async fn typst_slash(
-    ctx: poise::ApplicationContext<'_, Data, Error>,
-) -> Result<(), Error> {
-    if let Some(TypstModal { code }) = poise::execute_modal(ctx, None, None).await? {
-        render_and_send(poise::Context::Application(ctx), &code).await?;
-    }
+async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<(), Error> {
+    let Some(mut modal): Option<TypstModal> = poise::execute_modal(ctx, None, None).await? else {
+        return Ok(());
+    };
 
-    Ok(())
+    loop {
+        let formatted_code = format!("{PAGE_FRONTMATTER}\n{}", modal.code);
+        match compile_typst(&formatted_code) {
+            Ok(image_bytes) => {
+                send_img_bytes(poise::Context::Application(ctx), image_bytes).await?;
+                return Ok(());
+            }
+            Err(msg) => {
+                // Unique per invocation so collectors don't cross-talk.
+                let retry_id = format!("retry-{}", ctx.interaction.id);
+
+                let reply = poise::CreateReply::default()
+                    .ephemeral(true)
+                    .content(format!("⚠️ Compile failed:\n```\n{}\n```", msg))
+                    .components(vec![serenity::CreateActionRow::Buttons(vec![
+                        serenity::CreateButton::new(&retry_id).label("Edit & retry"),
+                    ])]);
+                ctx.send(reply).await?;
+
+                // Wait for the button. Fresh interaction we can attach a modal to.
+                let press = serenity::ComponentInteractionCollector::new(
+                    ctx.serenity_context().shard.clone(),
+                )
+                .filter(move |i| i.data.custom_id == retry_id)
+                .author_id(ctx.author().id)
+                .timeout(std::time::Duration::from_secs(600))
+                .await;
+
+                let Some(press) = press else {
+                    return Ok(()); // user gave up
+                };
+
+                // Reopen modal off the BUTTON interaction, prefilled with their code.
+                let Some(next) = poise::execute_modal_on_component_interaction(
+                    ctx,
+                    press,
+                    Some(modal), // prefill code from previous attempt
+                    None,
+                )
+                .await?
+                else {
+                    return Ok(());
+                };
+                modal = next;
+            }
+        }
+    }
 }
 
 /// Renders a message's typst markup
 #[poise::command(
     context_menu_command = "Render Typst",
     install_context = "Guild | User",
-    interaction_context = "Guild | PrivateChannel",
+    interaction_context = "Guild | PrivateChannel"
 )]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
     let content = msg.content.trim();
@@ -54,13 +98,14 @@ async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> 
         })
         .unwrap_or(content);
 
-    render_and_send(ctx, code).await
+    let formatted_code = format!("{PAGE_FRONTMATTER}\n{code}");
+    let image_bytes = compile_typst(&formatted_code)?;
+
+    send_img_bytes(ctx, image_bytes).await
 }
 
-async fn render_and_send(ctx: Context<'_>, code: &str) -> Result<(), Error> {
-    let code = format!("{PAGE_FRONTMATTER}\n{code}");
-
-    let image_bytes = compile_typst(&code)?;
+/// Takes raw image data and sends as a png to discord.
+async fn send_img_bytes(ctx: Context<'_>, image_bytes: Vec<u8>) -> Result<(), Error> {
     let attachment = serenity::CreateAttachment::bytes(image_bytes, "output.png");
     let reply = poise::CreateReply::default().attachment(attachment);
     ctx.send(reply).await?;
