@@ -11,7 +11,7 @@ const PAGE_FRONTMATTER: &str = "#set page(
 )";
 
 /// Renders a user's typst markup
-#[poise::command(slash_command)]
+#[poise::command(slash_command, rename = "rendertypst")]
 async fn typst_slash(
     ctx: Context<'_>,
     #[description = "Typst code"] code: String,
