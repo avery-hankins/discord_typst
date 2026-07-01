@@ -10,24 +10,35 @@ const PAGE_FRONTMATTER: &str = "#set page(
   margin: 0.3cm,
 )";
 
+#[derive(poise::Modal)]
+#[name = "Render Typst"]
+struct TypstModal {
+    #[name = "Typst code"]
+    #[paragraph]
+    code: String,
+}
+
 /// Renders a user's typst markup
 #[poise::command(
     slash_command,
     rename = "rendertypst",
-    install_context = "User",
+    install_context = "Guild | User",
     interaction_context = "Guild | PrivateChannel",
 )]
 async fn typst_slash(
-    ctx: Context<'_>,
-    #[description = "Typst code"] code: String,
+    ctx: poise::ApplicationContext<'_, Data, Error>,
 ) -> Result<(), Error> {
-    render_and_send(ctx, &code).await
+    if let Some(TypstModal { code }) = poise::execute_modal(ctx, None, None).await? {
+        render_and_send(poise::Context::Application(ctx), &code).await?;
+    }
+
+    Ok(())
 }
 
 /// Renders a message's typst markup
 #[poise::command(
     context_menu_command = "Render Typst",
-    install_context = "User",
+    install_context = "Guild | User",
     interaction_context = "Guild | PrivateChannel",
 )]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
@@ -127,8 +138,10 @@ async fn main() {
         })
         .build();
 
-    let client = serenity::ClientBuilder::new(token, intents)
+    let mut client = serenity::ClientBuilder::new(token, intents)
         .framework(framework)
-        .await;
-    client.unwrap().start().await.unwrap();
+        .await
+        .expect("failed to build client");
+
+    client.start().await.expect("failed to run client");
 }
