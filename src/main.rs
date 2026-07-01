@@ -111,14 +111,7 @@ async fn main() {
         })
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
-                poise::builtins::register_in_guild(
-                    ctx,
-                    &framework.options().commands,
-                    serenity::GuildId::new(1208241314110513162),
-                )
-                .await?;
-                poise::builtins::register_globally(ctx, &Vec::<poise::Command<Data, Error>>::new())
-                    .await?;
+                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 Ok(Data {})
             })
         })
