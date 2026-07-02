@@ -609,6 +609,7 @@ dependencies = [
  "dotenvy",
  "poise",
  "tokio",
+ "typst",
  "typst-as-lib",
  "typst-assets",
  "typst-layout",

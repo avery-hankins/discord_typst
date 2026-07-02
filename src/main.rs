@@ -1,14 +1,22 @@
 use poise::serenity_prelude as serenity;
+use typst::diag::{Severity, SourceDiagnostic};
+use typst::syntax::{DiagSpanKind, Source};
 
 struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
+
+enum CompileError {
+    Source(String), // user error
+    Internal(Error),
+}
 
 const PAGE_FRONTMATTER: &str = "#set page(
   width: auto,
   height: auto,
   margin: 0.3cm,
 )";
+const FRONTMATTER_LINES: usize = 5;
 
 #[derive(poise::Modal)]
 #[name = "Render Typst"]
@@ -37,14 +45,17 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
                 send_img_bytes(poise::Context::Application(ctx), image_bytes).await?;
                 return Ok(());
             }
-            Err(msg) => {
+            Err(e) => {
+                if let CompileError::Internal(_) = e {
+                    ctx.send(error_reply(&e)).await?;
+                    return Ok(());
+                }
+
                 // Unique per invocation so collectors don't cross-talk.
                 let retry_id = format!("retry-{}", ctx.interaction.id);
 
-                let reply = poise::CreateReply::default()
-                    .ephemeral(true)
-                    .content(format!("⚠️ Compile failed:\n```\n{}\n```", msg))
-                    .components(vec![serenity::CreateActionRow::Buttons(vec![
+                let reply =
+                    error_reply(&e).components(vec![serenity::CreateActionRow::Buttons(vec![
                         serenity::CreateButton::new(&retry_id).label("Edit & retry"),
                     ])]);
                 ctx.send(reply).await?;
@@ -99,9 +110,13 @@ async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> 
         .unwrap_or(content);
 
     let formatted_code = format!("{PAGE_FRONTMATTER}\n{code}");
-    let image_bytes = compile_typst(&formatted_code)?;
-
-    send_img_bytes(ctx, image_bytes).await
+    match compile_typst(&formatted_code) {
+        Ok(image_bytes) => send_img_bytes(ctx, image_bytes).await,
+        Err(e) => {
+            ctx.send(error_reply(&e)).await?;
+            Ok(())
+        }
+    }
 }
 
 /// Takes raw image data and sends as a png to discord.
@@ -140,15 +155,27 @@ fn choose_ppi(page: &typst_layout::Page) -> f64 {
     (target_ppi * fit).max(min_ppi)
 }
 
-fn compile_typst(code: &str) -> Result<Vec<u8>, Error> {
+fn compile_typst(code: &str) -> Result<Vec<u8>, CompileError> {
+    let source = Source::detached(code);
     let template = typst_as_lib::TypstEngine::builder()
-        .main_file(code)
+        .main_file(source.clone())
         .fonts(typst_assets::fonts())
         .build();
 
-    let doc: typst_layout::PagedDocument = template.compile().output?;
+    let doc: typst_layout::PagedDocument = match template.compile().output {
+        Ok(doc) => doc,
+        Err(typst_as_lib::TypstAsLibError::TypstSource(diags)) => {
+            return Err(CompileError::Source(format_diagnostics(&diags, &source)));
+        }
+        Err(e) => return Err(CompileError::Internal(e.into())),
+    };
 
-    let page = doc.pages().first().ok_or("typst produced no pages")?;
+    let page = match doc.pages().first() {
+        Some(page) => page,
+        None => {
+            return Err(CompileError::Internal("typst produced no pages".into()));
+        }
+    };
     let ppi = choose_ppi(page);
     let pixel_per_pt = typst_utils::Scalar::new(ppi / 72.0);
     let render_options = typst_render::RenderOptions {
@@ -157,16 +184,88 @@ fn compile_typst(code: &str) -> Result<Vec<u8>, Error> {
     };
     let pixmap = typst_render::render(page, &render_options);
 
-    let png = pixmap
-        .encode_png()
-        .map_err(|e| format!("png encode failed: {e}"))?;
+    match pixmap.encode_png() {
+        Ok(bytes) => Ok(bytes),
+        Err(e) => Err(CompileError::Internal(e.into())),
+    }
+}
 
-    Ok(png)
+/// Takes errors and warnings from Typst compilation process,
+/// formats them to be readable for app user.
+fn format_diagnostics(diags: &[SourceDiagnostic], source: &Source) -> String {
+    let mut out = String::new();
+    for (i, d) in diags.iter().enumerate() {
+        if i >= 5 {
+            if diags.len() == 6 {
+                out.push_str("\n… and 1 more error");
+            } else {
+                out.push_str(&format!("\n… and {} more errors", diags.len() - i));
+            }
+            break;
+        }
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+
+        let severity = match d.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+
+        // Line number, if the span resolves to our source
+        let line = match d.span.get() {
+            DiagSpanKind::Number { id, num, sub_range } if id == source.id() => {
+                source.range(num, sub_range)
+            }
+            DiagSpanKind::Range { id, range } if id == source.id() => Some(range),
+            _ => None, // detached or points at another file
+        }
+        .and_then(|r| source.lines().byte_to_line(r.start))
+        .map(|l| l + 1) // byte_to_line is 0-indexed
+        .filter(|l| *l > FRONTMATTER_LINES) // error inside frontmatter = our bug, hide the number
+        .map(|l| format!(" (line {})", l - FRONTMATTER_LINES));
+
+        out.push_str(&format!(
+            "{severity}: {}{}",
+            d.message,
+            line.unwrap_or_default()
+        ));
+        for hint in &d.hints {
+            out.push_str(&format!("\n  hint: {}", hint.v));
+        }
+    }
+    out
+}
+
+fn error_reply(err: &CompileError) -> poise::CreateReply {
+    let (title, body) = match err {
+        CompileError::Source(diags) => ("Typst compile error", diags.as_str()),
+        CompileError::Internal(e) => {
+            eprintln!("Internal error: {e}");
+            (
+                "Something went wrong",
+                "Internal error while rendering. Please try again later.",
+            )
+        }
+    };
+
+    // use zero width space to stop code block breakage
+    let body = body.replace("```", "`\u{200b}``");
+
+    // only take first 4k characters
+    let body: String = body.chars().take(4000).collect();
+
+    poise::CreateReply::default().ephemeral(true).embed(
+        serenity::CreateEmbed::new()
+            .title(title)
+            .color(0xED4245)
+            .description(format!("```\n{body}\n```")),
+    )
 }
 
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().expect("Failed to read .env file");
+    dotenvy::dotenv().expect("failed to read .env file");
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
     let intents = serenity::GatewayIntents::non_privileged();
 
