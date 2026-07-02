@@ -1,13 +1,27 @@
+use std::sync::LazyLock;
+
 use poise::serenity_prelude as serenity;
 use typst::diag::{Severity, SourceDiagnostic};
+use typst::foundations::Bytes;
+use typst::layout::Abs;
 use typst::syntax::{DiagSpanKind, Source};
+use typst::text::Font;
+use typst::visualize::Color;
+
+/// Embedded fonts, decoded once and reused across every compile.
+static FONTS: LazyLock<Vec<Font>> = LazyLock::new(|| {
+    typst_assets::fonts()
+        .flat_map(|bytes| Font::iter(Bytes::new(bytes)))
+        .collect()
+});
 
 struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
+#[derive(Debug)]
 enum CompileError {
-    Source(String), // user error
+    Source(String), // User error (bad typst code)
     Internal(Error),
 }
 
@@ -17,6 +31,8 @@ const PAGE_FRONTMATTER: &str = "#set page(
   margin: 0.3cm,
 )";
 const FRONTMATTER_LINES: usize = 5;
+/// Vertical gap (in pt) inserted between pages when stitching a multi-page doc.
+const PAGE_GAP_PT: f64 = 8.0;
 
 #[derive(poise::Modal)]
 #[name = "Render Typst"]
@@ -40,7 +56,21 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
 
     loop {
         let formatted_code = format!("{PAGE_FRONTMATTER}\n{}", modal.code);
-        match compile_typst(&formatted_code) {
+
+        // Show an ephemeral loading notice so the invoker gets feedback
+        // then replace on error/success.
+        let notice = ctx
+            .send(
+                poise::CreateReply::default()
+                    .ephemeral(true)
+                    .content("Rendering…"),
+            )
+            .await?;
+
+        let compile_result =
+            tokio::task::spawn_blocking(move || compile_typst(&formatted_code)).await?;
+        let _ = notice.delete(poise::Context::Application(ctx)).await;
+        match compile_result {
             Ok(image_bytes) => {
                 send_img_bytes(poise::Context::Application(ctx), image_bytes).await?;
                 return Ok(());
@@ -97,6 +127,7 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
     interaction_context = "Guild | PrivateChannel"
 )]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
+    ctx.defer().await?; // compilation may take awhile
     let content = msg.content.trim();
 
     // If the message is a ```markdown code block```, strip all non-content (including language).
@@ -110,7 +141,9 @@ async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> 
         .unwrap_or(content);
 
     let formatted_code = format!("{PAGE_FRONTMATTER}\n{code}");
-    match compile_typst(&formatted_code) {
+    let compile_result =
+        tokio::task::spawn_blocking(move || compile_typst(&formatted_code)).await?;
+    match compile_result {
         Ok(image_bytes) => send_img_bytes(ctx, image_bytes).await,
         Err(e) => {
             ctx.send(error_reply(&e)).await?;
@@ -129,12 +162,8 @@ async fn send_img_bytes(ctx: Context<'_>, image_bytes: Vec<u8>) -> Result<(), Er
 }
 
 /// Picks the highest rendering ppi that keeps the output within pixel budgets.
-/// Small content should stay crisp while large pages scale down.
-fn choose_ppi(page: &typst_layout::Page) -> f64 {
-    let size = page.frame.size();
-    let w_pt = size.x.to_pt();
-    let h_pt = size.y.to_pt();
-
+/// Small content stays crisp while large pages scale down.
+fn choose_ppi(w_pt: f64, h_pt: f64) -> f64 {
     let target_ppi = 576.0; // ppi for small content
     let min_ppi = 144.0; // ppi for large content
     let max_side = 2400.0; // px, longest edge
@@ -155,11 +184,17 @@ fn choose_ppi(page: &typst_layout::Page) -> f64 {
     (target_ppi * fit).max(min_ppi)
 }
 
+/// Compiles user-supplied Typst markup to a PNG.
+///
+/// SANDBOX: the engine is built without filesystem or package resolver,
+/// so untrusted code cannot read local files, or import `@preview` packages.
+/// This runs arbitrary user input, so do NOT add a filesystem/package resolver here,
+/// without gating what it can reach.
 fn compile_typst(code: &str) -> Result<Vec<u8>, CompileError> {
     let source = Source::detached(code);
     let template = typst_as_lib::TypstEngine::builder()
         .main_file(source.clone())
-        .fonts(typst_assets::fonts())
+        .fonts(FONTS.iter().cloned())
         .build();
 
     let doc: typst_layout::PagedDocument = match template.compile().output {
@@ -170,19 +205,33 @@ fn compile_typst(code: &str) -> Result<Vec<u8>, CompileError> {
         Err(e) => return Err(CompileError::Internal(e.into())),
     };
 
-    let page = match doc.pages().first() {
-        Some(page) => page,
-        None => {
-            return Err(CompileError::Internal("typst produced no pages".into()));
-        }
-    };
-    let ppi = choose_ppi(page);
-    let pixel_per_pt = typst_utils::Scalar::new(ppi / 72.0);
+    if doc.pages().is_empty() {
+        return Err(CompileError::Internal("typst produced no pages".into()));
+    }
+
+    // Budget the ppi against the whole stitched image (widest page by total
+    // height, incl. gaps).
+    let mut combined_w: f64 = 0.0;
+    let mut combined_h: f64 = 0.0;
+    for page in doc.pages() {
+        let size = page.frame.size();
+        combined_w = combined_w.max(size.x.to_pt());
+        combined_h += size.y.to_pt();
+    }
+    combined_h += PAGE_GAP_PT * doc.pages().len().saturating_sub(1) as f64;
+
+    let ppi = choose_ppi(combined_w, combined_h);
     let render_options = typst_render::RenderOptions {
-        pixel_per_pt,
+        pixel_per_pt: typst_utils::Scalar::new(ppi / 72.0),
         render_bleed: false,
     };
-    let pixmap = typst_render::render(page, &render_options);
+    // Render every page, stacked vertically with a white gap, into one image.
+    let pixmap = typst_render::render_merged(
+        &doc,
+        &render_options,
+        Abs::pt(PAGE_GAP_PT),
+        Some(Color::WHITE),
+    );
 
     match pixmap.encode_png() {
         Ok(bytes) => Ok(bytes),
@@ -288,4 +337,52 @@ async fn main() {
         .expect("failed to build client");
 
     client.start().await.expect("failed to run client");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compiles user code wrapped in our frontmatter, like the real handlers do.
+    fn compile(code: &str) -> Result<Vec<u8>, CompileError> {
+        compile_typst(&format!("{PAGE_FRONTMATTER}\n{code}"))
+    }
+
+    #[test]
+    fn renders_basic_content() {
+        assert!(compile("hello *world*").is_ok());
+    }
+
+    #[test]
+    fn renders_multiple_pages() {
+        // Force two pages; both should end up in one (non-empty) PNG.
+        let png = compile("first\n#pagebreak()\nsecond").expect("should render");
+        assert!(!png.is_empty());
+    }
+
+    // SANDBOX guards: untrusted code must not reach the filesystem or network.
+    // Each should be rejected as a *user* error (clean diagnostic), never a
+    // successful render and never an internal error leaked to the user.
+
+    #[test]
+    fn rejects_file_read() {
+        match compile(r#"#read("/etc/passwd")"#) {
+            Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
+            other => panic!(
+                "expected sandbox to reject file read, got {:?}",
+                other.is_ok()
+            ),
+        }
+    }
+
+    #[test]
+    fn rejects_package_import() {
+        match compile(r#"#import "@preview/cetz:0.2.0": *"#) {
+            Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
+            other => panic!(
+                "expected sandbox to reject package import, got {:?}",
+                other.is_ok()
+            ),
+        }
+    }
 }
