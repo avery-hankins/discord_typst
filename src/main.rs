@@ -8,6 +8,8 @@ use typst::syntax::{DiagSpanKind, Source};
 use typst::text::Font;
 use typst::visualize::Color;
 
+use serde::{Deserialize, Serialize};
+
 /// Embedded fonts, decoded once and reused across every compile.
 static FONTS: LazyLock<Vec<Font>> = LazyLock::new(|| {
     typst_assets::fonts()
@@ -19,10 +21,13 @@ struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum CompileError {
-    Source(String), // User error (bad typst code)
-    Internal(Error),
+    Source(String),   // User error (bad typst code)
+    Internal(String), // Simple error message, can use serde_error crate if needs to have backtrace,
+    // and other details.
+    Timeout,         // Compile took too long (MAX_COMPILE_SECONDS).
+    Crashed(String), // Compile failed for some other reason.
 }
 
 const PAGE_FRONTMATTER: &str = "#set page(
@@ -33,6 +38,9 @@ const PAGE_FRONTMATTER: &str = "#set page(
 const FRONTMATTER_LINES: usize = 5;
 /// Vertical gap (in pt) inserted between pages when stitching a multi-page doc.
 const PAGE_GAP_PT: f64 = 8.0;
+
+const MAX_COMPILE_SECONDS: u64 = 2 * 60;
+const MAX_COMPILE_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB
 
 #[derive(poise::Modal)]
 #[name = "Render Typst"]
@@ -67,8 +75,7 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
             )
             .await?;
 
-        let compile_result =
-            tokio::task::spawn_blocking(move || compile_typst(&formatted_code)).await?;
+        let compile_result = compile_in_subprocess(formatted_code).await;
         let _ = notice.delete(poise::Context::Application(ctx)).await;
         match compile_result {
             Ok(image_bytes) => {
@@ -76,7 +83,7 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
                 return Ok(());
             }
             Err(e) => {
-                if let CompileError::Internal(_) = e {
+                if matches!(e, CompileError::Internal(_) | CompileError::Crashed(_)) {
                     ctx.send(error_reply(&e)).await?;
                     return Ok(());
                 }
@@ -141,8 +148,7 @@ async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> 
         .unwrap_or(content);
 
     let formatted_code = format!("{PAGE_FRONTMATTER}\n{code}");
-    let compile_result =
-        tokio::task::spawn_blocking(move || compile_typst(&formatted_code)).await?;
+    let compile_result = compile_in_subprocess(formatted_code).await;
     match compile_result {
         Ok(image_bytes) => send_img_bytes(ctx, image_bytes).await,
         Err(e) => {
@@ -184,6 +190,40 @@ fn choose_ppi(w_pt: f64, h_pt: f64) -> f64 {
     (target_ppi * fit).max(min_ppi)
 }
 
+/// Creates a subprocess to run the typst compilation/rendering.
+/// This process gets killed when it takes too long or uses too much memory.
+async fn compile_in_subprocess(code: String) -> Result<Vec<u8>, CompileError> {
+    let mut compile_handle = procspawn::spawn(code, |code| {
+        // Limit address space so a (too) large compile gets aborted.
+        let rlimit_res = rlimit::setrlimit(rlimit::Resource::AS, MAX_COMPILE_BYTES, MAX_COMPILE_BYTES);
+        if let Err(e) = rlimit_res {
+            eprintln!("failed to set address space cap: {}", e);
+        }
+
+        compile_typst(&code)
+    });
+
+    tokio::task::spawn_blocking(move || {
+        match compile_handle.join_timeout(std::time::Duration::from_secs(MAX_COMPILE_SECONDS)) {
+            Ok(res) => res,
+            Err(e) if e.is_timeout() => {
+                let _ = compile_handle.kill();
+                Err(CompileError::Timeout)
+            }
+            Err(e) if e.is_panic() || e.is_remote_close() => {
+                let _ = compile_handle.kill();
+                Err(CompileError::Crashed(e.to_string()))
+            }
+            Err(e) => {
+                let _ = compile_handle.kill();
+                Err(CompileError::Internal(e.to_string()))
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|join_err| Err(CompileError::Internal(join_err.to_string())))
+}
+
 /// Compiles user-supplied Typst markup to a PNG.
 ///
 /// SANDBOX: the engine is built without filesystem or package resolver,
@@ -202,7 +242,7 @@ fn compile_typst(code: &str) -> Result<Vec<u8>, CompileError> {
         Err(typst_as_lib::TypstAsLibError::TypstSource(diags)) => {
             return Err(CompileError::Source(format_diagnostics(&diags, &source)));
         }
-        Err(e) => return Err(CompileError::Internal(e.into())),
+        Err(e) => return Err(CompileError::Internal(e.to_string())),
     };
 
     if doc.pages().is_empty() {
@@ -235,7 +275,7 @@ fn compile_typst(code: &str) -> Result<Vec<u8>, CompileError> {
 
     match pixmap.encode_png() {
         Ok(bytes) => Ok(bytes),
-        Err(e) => Err(CompileError::Internal(e.into())),
+        Err(e) => Err(CompileError::Internal(e.to_string())),
     }
 }
 
@@ -288,12 +328,26 @@ fn format_diagnostics(diags: &[SourceDiagnostic], source: &Source) -> String {
 
 fn error_reply(err: &CompileError) -> poise::CreateReply {
     let (title, body) = match err {
-        CompileError::Source(diags) => ("Typst compile error", diags.as_str()),
+        CompileError::Source(diags) => ("Typst compile error", diags.clone()),
         CompileError::Internal(e) => {
             eprintln!("Internal error: {e}");
             (
                 "Something went wrong",
-                "Internal error while rendering. Please try again later.",
+                "Internal error while rendering. Please try again later.".to_string(),
+            )
+        }
+        CompileError::Timeout => (
+            "Timeout error",
+            format!(
+                "Your code took longer than {} seconds to compile. Please try something simpler.",
+                MAX_COMPILE_SECONDS
+            ),
+        ),
+        CompileError::Crashed(e) => {
+            eprintln!("Compilation crash: {e}");
+            (
+                "Your rendering crashed",
+                "Something went wrong. Please try again later or try a simpler typst program (this error can be caused when the process runs out of memory).".to_string(),
             )
         }
     };
@@ -312,8 +366,16 @@ fn error_reply(err: &CompileError) -> poise::CreateReply {
     )
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // start point for spawned processes. created in non-async func to avoid multiple tokio runtimes
+    // being created.
+    procspawn::init();
+
+    let rt = tokio::runtime::Runtime::new().expect("failed to create async runtime");
+    rt.block_on(bot_start()); // start the bot
+}
+
+async fn bot_start() {
     dotenvy::dotenv().expect("failed to read .env file");
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
     let intents = serenity::GatewayIntents::non_privileged();
