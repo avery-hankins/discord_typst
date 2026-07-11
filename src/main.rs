@@ -9,6 +9,7 @@ use typst::text::Font;
 use typst::visualize::Color;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 /// Embedded fonts, decoded once and reused across every compile.
 static FONTS: LazyLock<Vec<Font>> = LazyLock::new(|| {
@@ -16,6 +17,11 @@ static FONTS: LazyLock<Vec<Font>> = LazyLock::new(|| {
         .flat_map(|bytes| Font::iter(Bytes::new(bytes)))
         .collect()
 });
+
+const NUM_PROCESSES: usize = 5;
+static PROCESS_POOL: LazyLock<procspawn::Pool> =
+    LazyLock::new(|| procspawn::Pool::new(NUM_PROCESSES).expect("failed to create process pool"));
+static COMPILE_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(NUM_PROCESSES));
 
 struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -193,9 +199,16 @@ fn choose_ppi(w_pt: f64, h_pt: f64) -> f64 {
 /// Creates a subprocess to run the typst compilation/rendering.
 /// This process gets killed when it takes too long or uses too much memory.
 async fn compile_in_subprocess(code: String) -> Result<Vec<u8>, CompileError> {
-    let mut compile_handle = procspawn::spawn(code, |code| {
+    // wait for compile slot
+    let _permit = COMPILE_SLOTS
+        .acquire()
+        .await
+        .expect("failed to acquire semaphore");
+
+    let mut compile_handle = PROCESS_POOL.spawn(code, |code| {
         // Limit address space so a (too) large compile gets aborted.
-        let rlimit_res = rlimit::setrlimit(rlimit::Resource::AS, MAX_COMPILE_BYTES, MAX_COMPILE_BYTES);
+        let rlimit_res =
+            rlimit::setrlimit(rlimit::Resource::AS, MAX_COMPILE_BYTES, MAX_COMPILE_BYTES);
         if let Err(e) = rlimit_res {
             eprintln!("failed to set address space cap: {}", e);
         }
@@ -367,6 +380,9 @@ fn error_reply(err: &CompileError) -> poise::CreateReply {
 }
 
 fn main() {
+    // warm fonts in each subprocess
+    LazyLock::force(&FONTS);
+
     // start point for spawned processes. created in non-async func to avoid multiple tokio runtimes
     // being created.
     procspawn::init();
@@ -397,6 +413,9 @@ async fn bot_start() {
         .framework(framework)
         .await
         .expect("failed to build client");
+
+    // warm subprocess pool
+    LazyLock::force(&PROCESS_POOL);
 
     client.start().await.expect("failed to run client");
 }
