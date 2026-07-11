@@ -1,15 +1,13 @@
-use std::sync::LazyLock;
-
 use poise::serenity_prelude as serenity;
+use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
+use tokio::sync::Semaphore;
 use typst::diag::{Severity, SourceDiagnostic};
 use typst::foundations::Bytes;
 use typst::layout::Abs;
 use typst::syntax::{DiagSpanKind, Source};
 use typst::text::Font;
 use typst::visualize::Color;
-
-use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
 
 /// Embedded fonts, decoded once and reused across every compile.
 static FONTS: LazyLock<Vec<Font>> = LazyLock::new(|| {
@@ -18,10 +16,9 @@ static FONTS: LazyLock<Vec<Font>> = LazyLock::new(|| {
         .collect()
 });
 
-const NUM_PROCESSES: usize = 5;
-static PROCESS_POOL: LazyLock<procspawn::Pool> =
-    LazyLock::new(|| procspawn::Pool::new(NUM_PROCESSES).expect("failed to create process pool"));
-static COMPILE_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(NUM_PROCESSES));
+/// Max number of processes that can be run at the same time.
+const MAX_PROCESSES: usize = 5;
+static COMPILE_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(MAX_PROCESSES));
 
 struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -205,7 +202,7 @@ async fn compile_in_subprocess(code: String) -> Result<Vec<u8>, CompileError> {
         .await
         .expect("failed to acquire semaphore");
 
-    let mut compile_handle = PROCESS_POOL.spawn(code, |code| {
+    let mut compile_handle = procspawn::spawn(code, |code| {
         // Limit address space so a (too) large compile gets aborted.
         let rlimit_res =
             rlimit::setrlimit(rlimit::Resource::AS, MAX_COMPILE_BYTES, MAX_COMPILE_BYTES);
@@ -413,9 +410,6 @@ async fn bot_start() {
         .framework(framework)
         .await
         .expect("failed to build client");
-
-    // warm subprocess pool
-    LazyLock::force(&PROCESS_POOL);
 
     client.start().await.expect("failed to run client");
 }
