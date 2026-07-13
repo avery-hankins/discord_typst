@@ -104,17 +104,7 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
 )]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
     ctx.defer().await?; // compilation may take awhile
-    let content = msg.content.trim();
-
-    // If the message is a ```markdown code block```, strip all non-content (including language).
-    let code = content
-        .strip_prefix("```")
-        .and_then(|s| s.strip_suffix("```"))
-        .map(|inner| match inner.split_once('\n') {
-            Some((_first_line, rest)) => rest,
-            None => inner,
-        })
-        .unwrap_or(content);
+    let code = strip_code_block(msg.content.trim());
 
     let formatted_code = format!("{PAGE_FRONTMATTER}\n{code}");
     let compile_result = compile_in_subprocess(formatted_code).await;
@@ -125,6 +115,18 @@ async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> 
             Ok(())
         }
     }
+}
+
+/// If the message is a ```markdown code block```, strip all non-content (including language).
+fn strip_code_block(content: &str) -> &str {
+    content
+        .strip_prefix("```")
+        .and_then(|s| s.strip_suffix("```"))
+        .map(|inner| match inner.split_once('\n') {
+            Some((_first_line, rest)) => rest,
+            None => inner,
+        })
+        .unwrap_or(content)
 }
 
 /// Takes raw image data and sends as a png to discord.

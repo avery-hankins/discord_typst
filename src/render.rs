@@ -33,7 +33,7 @@ pub const PAGE_FRONTMATTER: &str = "#set page(
   height: auto,
   margin: 0.3cm,
 )";
-const FRONTMATTER_LINES: usize = 5;
+pub(crate) const FRONTMATTER_LINES: usize = 5;
 /// Vertical gap (in pt) inserted between pages when stitching a multi-page doc.
 const PAGE_GAP_PT: f64 = 8.0;
 
@@ -42,7 +42,7 @@ const MAX_COMPILE_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB
 
 /// Picks the highest rendering ppi that keeps the output within pixel budgets.
 /// Small content stays crisp while large pages scale down.
-fn choose_ppi(w_pt: f64, h_pt: f64) -> f64 {
+pub(crate) fn choose_ppi(w_pt: f64, h_pt: f64) -> f64 {
     let target_ppi = 576.0; // ppi for small content
     let min_ppi = 144.0; // ppi for large content
     let max_side = 2400.0; // px, longest edge
@@ -66,6 +66,16 @@ fn choose_ppi(w_pt: f64, h_pt: f64) -> f64 {
 /// Creates a subprocess to run the typst compilation/rendering.
 /// This process gets killed when it takes too long or uses too much memory.
 pub async fn compile_in_subprocess(code: String) -> Result<Vec<u8>, CompileError> {
+    compile_in_subprocess_with_timeout(code, std::time::Duration::from_secs(MAX_COMPILE_SECONDS))
+        .await
+}
+
+/// Like [`compile_in_subprocess`] but with a caller-chosen timeout,
+/// so tests don't have to wait out the full production limit.
+pub(crate) async fn compile_in_subprocess_with_timeout(
+    code: String,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, CompileError> {
     // wait for compile slot
     let _permit = COMPILE_SLOTS
         .acquire()
@@ -83,21 +93,19 @@ pub async fn compile_in_subprocess(code: String) -> Result<Vec<u8>, CompileError
         compile_typst(&code)
     });
 
-    tokio::task::spawn_blocking(move || {
-        match compile_handle.join_timeout(std::time::Duration::from_secs(MAX_COMPILE_SECONDS)) {
-            Ok(res) => res,
-            Err(e) if e.is_timeout() => {
-                let _ = compile_handle.kill();
-                Err(CompileError::Timeout)
-            }
-            Err(e) if e.is_panic() || e.is_remote_close() => {
-                let _ = compile_handle.kill();
-                Err(CompileError::Crashed(e.to_string()))
-            }
-            Err(e) => {
-                let _ = compile_handle.kill();
-                Err(CompileError::Internal(e.to_string()))
-            }
+    tokio::task::spawn_blocking(move || match compile_handle.join_timeout(timeout) {
+        Ok(res) => res,
+        Err(e) if e.is_timeout() => {
+            let _ = compile_handle.kill();
+            Err(CompileError::Timeout)
+        }
+        Err(e) if e.is_panic() || e.is_remote_close() => {
+            let _ = compile_handle.kill();
+            Err(CompileError::Crashed(e.to_string()))
+        }
+        Err(e) => {
+            let _ = compile_handle.kill();
+            Err(CompileError::Internal(e.to_string()))
         }
     })
     .await
