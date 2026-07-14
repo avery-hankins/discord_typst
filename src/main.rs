@@ -103,10 +103,20 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
     interaction_context = "Guild | PrivateChannel"
 )]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
-    ctx.defer().await?; // compilation may take awhile
+    if msg.content.trim().is_empty() {
+        ctx.send(
+            poise::CreateReply::default()
+                .ephemeral(true)
+                .content("No text found in message."),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let code = strip_code_block(msg.content.trim());
 
     let formatted_code = format!("{PAGE_FRONTMATTER}\n{code}");
+    ctx.defer().await?; // compilation may take awhile
     let compile_result = compile_in_subprocess(formatted_code).await;
     match compile_result {
         Ok(image_bytes) => send_img_bytes(ctx, image_bytes).await,
