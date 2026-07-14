@@ -1,4 +1,6 @@
-![logo](./logo.png)
+<p align="center">
+  <img src="./logo.png" alt="logo" width="150">
+</p>
 
 # Typst Render (Discord Bot)
 
