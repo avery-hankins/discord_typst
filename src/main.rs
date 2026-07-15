@@ -5,7 +5,10 @@ mod tests;
 use poise::serenity_prelude as serenity;
 use std::sync::LazyLock;
 
-use render::{CompileError, FONTS, MAX_COMPILE_SECONDS, PAGE_FRONTMATTER, compile_in_subprocess};
+use render::{
+    CompileError, FONTS, MAX_COMPILE_SECONDS, PAGE_FRONTMATTER, compile_in_subprocess,
+    is_set_address_space_cap_supported,
+};
 
 struct Data {} // User data, stored and accessible in command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -202,6 +205,11 @@ fn main() {
 async fn bot_start() {
     dotenvy::dotenv().expect("failed to read .env file");
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
+
+    if !is_set_address_space_cap_supported() {
+        eprintln!("setrlimit not supported, no per-process memory limit. You may run out of memory.");
+    }
+
     let intents = serenity::GatewayIntents::non_privileged();
 
     let framework = poise::Framework::builder()

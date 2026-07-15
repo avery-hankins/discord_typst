@@ -63,6 +63,11 @@ pub(crate) fn choose_ppi(w_pt: f64, h_pt: f64) -> f64 {
     (target_ppi * fit).max(min_ppi)
 }
 
+pub(crate) fn is_set_address_space_cap_supported() -> bool {
+    // setrlimit on address space errors on Mac.
+    rlimit::Resource::AS.is_supported() && !cfg!(target_os = "macos")
+}
+
 /// Creates a subprocess to run the typst compilation/rendering.
 /// This process gets killed when it takes too long or uses too much memory.
 pub async fn compile_in_subprocess(code: String) -> Result<Vec<u8>, CompileError> {
@@ -84,10 +89,12 @@ pub(crate) async fn compile_in_subprocess_with_timeout(
 
     let mut compile_handle = procspawn::spawn(code, |code| {
         // Limit address space so a (too) large compile gets aborted.
-        let rlimit_res =
-            rlimit::setrlimit(rlimit::Resource::AS, MAX_COMPILE_BYTES, MAX_COMPILE_BYTES);
-        if let Err(e) = rlimit_res {
-            eprintln!("failed to set address space cap: {}", e);
+        if is_set_address_space_cap_supported() {
+            let rlimit_res =
+                rlimit::setrlimit(rlimit::Resource::AS, MAX_COMPILE_BYTES, MAX_COMPILE_BYTES);
+            if let Err(e) = rlimit_res {
+                eprintln!("failed to set address space cap: {}", e);
+            }
         }
 
         compile_typst(&code)
