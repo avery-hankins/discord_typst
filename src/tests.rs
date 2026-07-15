@@ -105,11 +105,14 @@ fn strip_code_block_leaves_intentional_blocks() {
 
     // Multiple inner blocks
     let input = "```\nExample 1:\n```python\nprint('hello')\n```\n\nExample 2:\n```js\nconsole.log('hi')\n```\n```";
-    let expected = "Example 1:\n```python\nprint('hello')\n```\n\nExample 2:\n```js\nconsole.log('hi')\n```\n";
+    let expected =
+        "Example 1:\n```python\nprint('hello')\n```\n\nExample 2:\n```js\nconsole.log('hi')\n```\n";
     assert_eq!(strip_code_block(input), expected);
 
-    let input = "Example 1:\n```python\nprint('hello')\n```\n\nExample 2:\n```js\nconsole.log('hi')\n```";
-    let expected = "Example 1:\n```python\nprint('hello')\n```\n\nExample 2:\n```js\nconsole.log('hi')\n```";
+    let input =
+        "Example 1:\n```python\nprint('hello')\n```\n\nExample 2:\n```js\nconsole.log('hi')\n```";
+    let expected =
+        "Example 1:\n```python\nprint('hello')\n```\n\nExample 2:\n```js\nconsole.log('hi')\n```";
     assert_eq!(strip_code_block(input), expected);
 }
 
@@ -120,7 +123,7 @@ fn strip_code_block_single_line_block_keeps_content() {
 }
 
 // SANDBOX guards: untrusted code must not reach the filesystem or network.
-// Each should be rejected as a *user* error, never a successful render 
+// Each should be rejected as a *user* error, never a successful render
 // and never an internal error leaked to the user.
 
 #[test]

@@ -207,7 +207,9 @@ async fn bot_start() {
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
 
     if !is_set_address_space_cap_supported() {
-        eprintln!("setrlimit not supported, no per-process memory limit. You may run out of memory.");
+        eprintln!(
+            "setrlimit not supported, no per-process memory limit. You may run out of memory."
+        );
     }
 
     let intents = serenity::GatewayIntents::non_privileged();
