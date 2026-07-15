@@ -103,7 +103,8 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
     interaction_context = "Guild | PrivateChannel"
 )]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
-    if msg.content.trim().is_empty() {
+    let code = strip_code_block(msg.content.trim());
+    if code.trim().is_empty() {
         ctx.send(
             poise::CreateReply::default()
                 .ephemeral(true)
@@ -112,8 +113,6 @@ async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> 
         .await?;
         return Ok(());
     }
-
-    let code = strip_code_block(msg.content.trim());
 
     let formatted_code = format!("{PAGE_FRONTMATTER}\n{code}");
     ctx.defer().await?; // compilation may take awhile
