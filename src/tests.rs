@@ -1,3 +1,4 @@
+use crate::packages::{self, ALLOWED};
 use crate::render::{
     CompileError, FRONTMATTER_LINES, PAGE_FRONTMATTER, choose_ppi,
     compile_in_subprocess_with_timeout, compile_typst,
@@ -9,6 +10,24 @@ procspawn::enable_test_support!();
 /// Compiles user code wrapped in our frontmatter, like the real handlers do.
 fn compile(code: &str) -> Result<Vec<u8>, CompileError> {
     compile_typst(&format!("{PAGE_FRONTMATTER}\n{code}"))
+}
+
+/// Missing packages surface from the resolver as a bare "file not found",
+/// so check up front to point at the fix.
+fn assert_all_vendored() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packages");
+    for package in ALLOWED.iter() {
+        let spec = &package.spec;
+        let manifest = root
+            .join(spec.namespace.as_str())
+            .join(spec.name.as_str())
+            .join(spec.version.to_string())
+            .join("typst.toml");
+        assert!(
+            manifest.exists(),
+            "{spec} is whitelisted but not vendored; run scripts/vendor-packages.sh"
+        );
+    }
 }
 
 #[test]
@@ -138,12 +157,88 @@ fn rejects_file_read() {
 }
 
 #[test]
-fn rejects_package_import() {
-    match compile(r#"#import "@preview/cetz:0.2.0": *"#) {
+fn rejects_unlisted_package_import() {
+    match compile(r#"#import "@preview/tablex:0.0.8": *"#) {
         Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
         other => panic!(
             "expected sandbox to reject package import, got {:?}",
             other.is_ok()
         ),
     }
+}
+
+/// The whitelist is per version, not per package: an allowed name at an
+/// unvendored version must still be rejected.
+#[test]
+fn rejects_unlisted_version_of_listed_package() {
+    let unlisted = r#"#import "@preview/cetz:0.4.2": *"#;
+    assert!(
+        packages::listed().any(|(p, _)| p.spec.name == "cetz"),
+        "test assumes cetz is listed at some other version"
+    );
+    match compile(unlisted) {
+        Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
+        other => panic!("expected rejection, got {:?}", other.is_ok()),
+    }
+}
+
+/// Every advertised package must actually render, which also exercises the
+/// transitive dependencies they pull in.
+#[test]
+fn listed_packages_render() {
+    assert_all_vendored();
+
+    let cases = [
+        (
+            "cetz",
+            r#"#import "@preview/cetz:0.5.2": canvas, draw
+#canvas({ draw.circle((0, 0), radius: 1) })"#,
+        ),
+        (
+            "fletcher",
+            r#"#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge
+#diagram(node((0, 0), $A$), edge("->"), node((1, 0), $B$))"#,
+        ),
+        (
+            "lilaq",
+            r#"#import "@preview/lilaq:0.6.0" as lq
+#lq.diagram(lq.plot((1, 2, 3), (1, 4, 9)))"#,
+        ),
+    ];
+
+    for (name, code) in cases {
+        if let Err(e) = compile(code) {
+            panic!("{name} failed to render: {e:?}");
+        }
+    }
+}
+
+/// The whitelist and the vendored tree are edited separately; a listed
+/// package with no files on disk only fails at render time otherwise.
+#[test]
+fn every_listed_package_is_vendored() {
+    assert_all_vendored();
+}
+
+#[test]
+fn package_list_separates_listed_packages_from_dependencies() {
+    let parsed = packages::parse_package_list(
+        "# comment
+
+@preview/cetz:0.5.2 | CeTZ | drawing
+@preview/oxifmt:1.0.0
+",
+    );
+    let mut parsed = parsed.into_iter();
+
+    let cetz = parsed.next().expect("cetz parsed");
+    let listing = cetz.listing.as_ref().expect("cetz is listed");
+    assert_eq!(listing.display_name, "CeTZ");
+    assert_eq!(listing.description, "drawing");
+    assert_eq!(cetz.import_path(), "@preview/cetz:0.5.2");
+
+    let oxifmt = parsed.next().expect("oxifmt parsed");
+    assert!(oxifmt.listing.is_none(), "dependencies are not listed");
+
+    assert!(parsed.next().is_none(), "comments and blanks are skipped");
 }

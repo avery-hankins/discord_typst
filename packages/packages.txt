@@ -1,0 +1,21 @@
+# Format: @namespace/name:version [| Display name | one-line description]
+# Entries with a description are advertised by /typstpackages. The rest are
+# unlisted transitive dependencies.
+#
+# The script fails if a vendored package imports something that is not listed here.
+
+@preview/cetz:0.5.2 | CeTZ | Drawing with Typst with an API inspired by TikZ and Processing.
+@preview/fletcher:0.5.8 | Fletcher | A Typst package for drawing diagrams with arrows, built on top of CeTZ.
+@preview/lilaq:0.6.0 | Lilaq | Lilaq is a powerful plotting library for Typst.
+@preview/algo:0.3.6 | algo | A Typst library for writing algorithms.
+
+# dependencies of the above
+@preview/cetz:0.3.4
+@preview/elembic:1.1.1
+@preview/komet:0.1.0
+@preview/komet:0.2.0
+@preview/oxifmt:0.2.1
+@preview/oxifmt:1.0.0
+@preview/suiji:0.5.1
+@preview/tiptoe:0.4.0
+@preview/zero:0.6.1

@@ -1,3 +1,4 @@
+mod packages;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,7 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 struct TypstModal {
     #[name = "Typst code"]
     #[paragraph]
+    #[placeholder = "$sum_(k=1)^n k$    |   /typstpackages for importable packages"]
     code: String,
 }
 
@@ -97,6 +99,38 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
             }
         }
     }
+}
+
+/// Lists the Typst packages you can import
+#[poise::command(
+    slash_command,
+    rename = "typstpackages",
+    install_context = "Guild | User",
+    interaction_context = "Guild | PrivateChannel"
+)]
+async fn typst_packages(ctx: Context<'_>) -> Result<(), Error> {
+    let mut description = String::new();
+    for (package, listing) in packages::listed() {
+        description.push_str(&format!(
+            "**[{}]({})** — {}\n`#import \"{}\"`\n\n",
+            listing.display_name,
+            package.universe_url(),
+            listing.description,
+            package.import_path(),
+        ));
+    }
+    description.push_str("Versions are pinned: importing any other package or version fails.");
+
+    ctx.send(
+        poise::CreateReply::default().ephemeral(true).embed(
+            serenity::CreateEmbed::new()
+                .title("Available Typst packages")
+                .description(description),
+        ),
+    )
+    .await?;
+
+    Ok(())
 }
 
 /// Renders a message's typst markup
@@ -193,6 +227,8 @@ fn error_reply(err: &CompileError) -> poise::CreateReply {
 fn main() {
     // warm fonts in each subprocess
     LazyLock::force(&FONTS);
+    // decide package supplier success/error at startup
+    packages::force_loaded();
 
     // start point for spawned processes. created in non-async func to avoid multiple tokio runtimes
     // being created.
@@ -216,7 +252,7 @@ async fn bot_start() {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![typst_slash(), typst_msg()],
+            commands: vec![typst_slash(), typst_msg(), typst_packages()],
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {

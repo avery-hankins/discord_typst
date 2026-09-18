@@ -17,6 +17,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: Swatinem/rust-cache@v2
+    - uses: actions/cache@v4
+      with:
+        path: packages
+        key: typst-pkgs-${{ hashFiles('packages/packages.txt', 'scripts/vendor-packages.sh') }}
+    - name: Vendor Typst packages
+      run: scripts/vendor-packages.sh
     - name: Format
       run: cargo fmt --check
     - name: Build
