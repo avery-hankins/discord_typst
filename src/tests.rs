@@ -171,7 +171,7 @@ fn rejects_unlisted_package_import() {
 /// unvendored version must still be rejected.
 #[test]
 fn rejects_unlisted_version_of_listed_package() {
-    let unlisted = r#"#import "@preview/cetz:0.4.2": *"#;
+    let unlisted = r#"#import "@preview/cetz:0.4.0": *"#;
     assert!(
         packages::listed().any(|(p, _)| p.spec.name == "cetz"),
         "test assumes cetz is listed at some other version"
