@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 dotenvy = "0.15.7"
-poise = "0.6"
-tokio = { version = "1.0", features = ["full"] }
+poise = { version = "0.6", default-features = false, features = ["handle_panics"] }
+serenity = { version = "0.12", default-features = false, features = ["rustls_backend"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync"] }
 typst-as-lib = "0.16.0"
 typst = "0.15.0"
 typst-render = "0.15.0"
@@ -21,3 +22,9 @@ rlimit = "0.11.0"
 string_slice = "warn"
 indexing_slicing = "warn"
 unwrap_used = "warn"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
