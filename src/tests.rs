@@ -223,7 +223,7 @@ fn every_listed_package_is_vendored() {
 }
 
 // Network tests: these hit packages.typst.org, so they are not part of the
-// default run. `cargo test -- --ignored` to exercise the fallback.
+// default run. CI runs them via `cargo test -- --include-ignored`.
 
 /// A package that isn't vendored has to come off the registry.
 #[test]
@@ -258,8 +258,8 @@ fn package_list_separates_listed_packages_from_dependencies() {
     );
     let mut parsed = parsed.into_iter();
 
-    let _ = parsed.next().expect("cetz parsed");
-    let _ = parsed.next().expect("oxifmt parsed");
+    parsed.next().expect("cetz parsed");
+    parsed.next().expect("oxifmt parsed");
 
     assert!(parsed.next().is_none(), "comments and blanks are skipped");
 }
