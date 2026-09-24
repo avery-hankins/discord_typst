@@ -108,19 +108,62 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
     interaction_context = "Guild | PrivateChannel"
 )]
 async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> Result<(), Error> {
-    let code = strip_code_block(msg.content.trim());
-    if code.trim().is_empty() {
-        ctx.send(
-            poise::CreateReply::default()
-                .ephemeral(true)
-                .content("No text found in message."),
-        )
-        .await?;
+    const MAX_TXT_BYTES: u32 = 100_000;
+
+    let inline = strip_code_block(msg.content.trim());
+
+    // Discord turns long pastes into a `message.txt` attachment, so fall back to one.
+    let txt = if inline.trim().is_empty() {
+        msg.attachments.iter().find(|a| {
+            a.filename.ends_with(".txt")
+                || a.content_type
+                    .as_deref()
+                    .is_some_and(|t| t.starts_with("text"))
+        })
+    } else {
+        None
+    };
+
+    if inline.trim().is_empty() && txt.is_none() {
+        ctx.send(poise::CreateReply::default().content("No text found in message."))
+            .await?;
+        return Ok(());
+    }
+    if let Some(a) = txt
+        && a.size > MAX_TXT_BYTES
+    {
+        let msg = format!("Attachment too large (max {} KB).", MAX_TXT_BYTES / 1000);
+        ctx.send(poise::CreateReply::default().content(msg)).await?;
         return Ok(());
     }
 
+    ctx.defer().await?; // download and compilation may take awhile
+
+    let downloaded;
+    let code = match txt {
+        Some(a) => {
+            let Ok(text) = String::from_utf8(a.download().await?) else {
+                ctx.send(
+                    poise::CreateReply::default()
+                        .ephemeral(true)
+                        .content("Attachment is not valid UTF-8."),
+                )
+                .await?;
+                return Ok(());
+            };
+            downloaded = text;
+            let code = strip_code_block(downloaded.trim());
+            if code.trim().is_empty() {
+                ctx.send(poise::CreateReply::default().content("No text found in attachment."))
+                    .await?;
+                return Ok(());
+            }
+            code
+        }
+        None => inline,
+    };
+
     let formatted_code = format!("{PAGE_FRONTMATTER}\n{code}");
-    ctx.defer().await?; // compilation may take awhile
     let compile_result = compile_in_subprocess(formatted_code).await;
     match compile_result {
         Ok(image_bytes) => send_img_bytes(ctx, image_bytes).await,
