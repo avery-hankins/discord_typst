@@ -122,16 +122,16 @@ pub(crate) async fn compile_in_subprocess_with_timeout(
 
 /// Compiles user-supplied Typst markup to a PNG.
 ///
-/// SANDBOX: the only resolver is [`packages::resolver`], which serves the
-/// vendored packages in `packages/` and nothing else, so untrusted code cannot
-/// read local files or pull anything off the network. This runs arbitrary user
-/// input, so any resolver added here must be gated the same way.
+/// Resolvers are tried in order, so a package vendored into
+/// `packages/` is served from disk registry. Neither resolver
+/// allows arbitrary reads from the filesystem.
 pub fn compile_typst(code: &str) -> Result<Vec<u8>, CompileError> {
     let source = Source::detached(code);
     let template = typst_as_lib::TypstEngine::builder()
         .main_file(source.clone())
         .fonts(FONTS.iter().cloned())
-        .add_file_resolver(packages::resolver())
+        .add_file_resolver(packages::vendored_resolver())
+        .add_file_resolver(packages::network_resolver())
         .build();
 
     let doc: typst_layout::PagedDocument = match template.compile().output {

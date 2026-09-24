@@ -1,4 +1,4 @@
-use crate::packages::{self, ALLOWED};
+use crate::packages::{self, VENDORED};
 use crate::render::{
     CompileError, FRONTMATTER_LINES, PAGE_FRONTMATTER, choose_ppi,
     compile_in_subprocess_with_timeout, compile_typst,
@@ -16,7 +16,7 @@ fn compile(code: &str) -> Result<Vec<u8>, CompileError> {
 /// so check up front to point at the fix.
 fn assert_all_vendored() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packages");
-    for package in ALLOWED.iter() {
+    for package in VENDORED.iter() {
         let spec = &package.spec;
         let manifest = root
             .join(spec.namespace.as_str())
@@ -25,7 +25,7 @@ fn assert_all_vendored() {
             .join("typst.toml");
         assert!(
             manifest.exists(),
-            "{spec} is whitelisted but not vendored; run scripts/vendor-packages.sh"
+            "{spec} is listed but not vendored; run scripts/vendor-packages.sh"
         );
     }
 }
@@ -141,8 +141,8 @@ fn strip_code_block_single_line_block_keeps_content() {
     assert_eq!(strip_code_block("```$x^2$```"), "$x^2$");
 }
 
-// SANDBOX guards: untrusted code must not reach the filesystem or network.
-// Each should be rejected as a *user* error, never a successful render
+// SANDBOX guards: untrusted code may reach the package registry and nothing
+// else. Each should be rejected as a *user* error, never a successful render
 // and never an internal error leaked to the user.
 
 #[test]
@@ -156,29 +156,31 @@ fn rejects_file_read() {
     }
 }
 
+/// Only `@preview` is downloadable, so any other namespace must fail without
+/// touching the network - `@local` in particular would otherwise be a path
+/// into the host's package directory.
 #[test]
-fn rejects_unlisted_package_import() {
-    match compile(r#"#import "@preview/tablex:0.0.8": *"#) {
+fn rejects_non_preview_namespace() {
+    match compile(r#"#import "@local/anything:1.0.0": *"#) {
         Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
         other => panic!(
-            "expected sandbox to reject package import, got {:?}",
+            "expected sandbox to reject non-preview namespace, got {:?}",
             other.is_ok()
         ),
     }
 }
 
-/// The whitelist is per version, not per package: an allowed name at an
-/// unvendored version must still be rejected.
+/// Vendored packages must resolve from disk, which is what keeps the common
+/// imports off the network. Resolver order does the work; this pins the two
+/// halves of it together.
 #[test]
-fn rejects_unlisted_version_of_listed_package() {
-    let unlisted = r#"#import "@preview/cetz:0.4.0": *"#;
-    assert!(
-        packages::listed().any(|(p, _)| p.spec.name == "cetz"),
-        "test assumes cetz is listed at some other version"
-    );
-    match compile(unlisted) {
-        Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
-        other => panic!("expected rejection, got {:?}", other.is_ok()),
+fn listed_packages_resolve_without_the_network() {
+    for (package, _) in packages::listed() {
+        assert!(
+            packages::is_vendored(&package.spec),
+            "{} is advertised but would be downloaded",
+            package.spec
+        );
     }
 }
 
@@ -213,11 +215,36 @@ fn listed_packages_render() {
     }
 }
 
-/// The whitelist and the vendored tree are edited separately; a listed
+/// The package list and the vendored tree are edited separately; a listed
 /// package with no files on disk only fails at render time otherwise.
 #[test]
 fn every_listed_package_is_vendored() {
     assert_all_vendored();
+}
+
+// Network tests: these hit packages.typst.org, so they are not part of the
+// default run. `cargo test -- --ignored` to exercise the fallback.
+
+/// A package that isn't vendored has to come off the registry.
+#[test]
+#[ignore = "requires network"]
+fn downloads_unvendored_package() {
+    let code = r#"#import "@preview/physica:0.9.5": *
+$ grad f $"#;
+    if let Err(e) = compile(code) {
+        panic!("expected registry fallback to render, got {e:?}");
+    }
+}
+
+/// A package that doesn't exist should come back as a user error, not a crash
+/// or an internal error.
+#[test]
+#[ignore = "requires network"]
+fn rejects_package_missing_from_registry() {
+    match compile(r#"#import "@preview/definitely-not-a-package:1.0.0": *"#) {
+        Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
+        other => panic!("expected a user-facing error, got {:?}", other.is_ok()),
+    }
 }
 
 #[test]

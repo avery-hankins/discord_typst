@@ -8,7 +8,7 @@ dotenvy = "0.15.7"
 poise = { version = "0.6", default-features = false, features = ["handle_panics"] }
 serenity = { version = "0.12", default-features = false, features = ["rustls_backend"] }
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync"] }
-typst-as-lib = "0.16.0"
+typst-as-lib = { version = "0.16.0", features = ["packages", "ureq"] }
 typst = "0.15.0"
 typst-render = "0.15.0"
 typst-utils = "0.15.0"
@@ -17,6 +17,7 @@ typst-assets = { version = "0.15.0", features = ["fonts"] }
 procspawn = { version = "1.0.1", features = ["test-support"] }
 serde = { version = "1.0.228", features = ["derive"] }
 rlimit = "0.11.0"
+ureq = "3.1"
 
 [lints.clippy]
 string_slice = "warn"

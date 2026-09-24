@@ -101,7 +101,7 @@ async fn typst_slash(ctx: poise::ApplicationContext<'_, Data, Error>) -> Result<
     }
 }
 
-/// Lists the Typst packages you can import
+/// Lists the Typst packages that are built in
 #[poise::command(
     slash_command,
     rename = "typstpackages",
@@ -119,12 +119,15 @@ async fn typst_packages(ctx: Context<'_>) -> Result<(), Error> {
             package.import_path(),
         ));
     }
-    description.push_str("Versions are pinned: importing any other package or version fails.");
+    description.push_str(
+        "Any other [Typst Universe](https://typst.app/universe) package works too — \
+         it gets downloaded when you render, so the first import is slower.",
+    );
 
     ctx.send(
         poise::CreateReply::default().ephemeral(true).embed(
             serenity::CreateEmbed::new()
-                .title("Available Typst packages")
+                .title("Built-in Typst packages")
                 .description(description),
         ),
     )
