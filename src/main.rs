@@ -113,9 +113,11 @@ async fn typst_msg(ctx: Context<'_>, msg: serenity::model::channel::Message) -> 
     let inline = strip_code_block(msg.content.trim());
 
     // Discord turns long pastes into a `message.txt` attachment, so fall back to one.
+    // User might also upload .typ file and expect it to work.
     let txt = if inline.trim().is_empty() {
         msg.attachments.iter().find(|a| {
             a.filename.ends_with(".txt")
+                || a.filename.ends_with(".typ")
                 || a.content_type
                     .as_deref()
                     .is_some_and(|t| t.starts_with("text"))
