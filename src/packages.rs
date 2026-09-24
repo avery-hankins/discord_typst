@@ -26,23 +26,6 @@ pub static VENDORED: LazyLock<Vec<VendoredPackage>> =
 
 pub struct VendoredPackage {
     pub spec: PackageSpec,
-    pub listing: Option<Listing>,
-}
-
-pub struct Listing {
-    pub display_name: &'static str,
-    pub description: &'static str,
-}
-
-impl VendoredPackage {
-    /// The import path a user writes, e.g. `@preview/cetz:0.5.2`.
-    pub fn import_path(&self) -> String {
-        self.spec.to_string()
-    }
-
-    pub fn universe_url(&self) -> String {
-        format!("https://typst.app/universe/package/{}", self.spec.name)
-    }
 }
 
 /// Parses `packages/packages.txt`. Panics on malformed line: the file is
@@ -61,16 +44,7 @@ pub(crate) fn parse_package_list(list: &'static str) -> Vec<VendoredPackage> {
         let spec = PackageSpec::from_str(spec)
             .unwrap_or_else(|e| panic!("bad package spec in packages.txt: {line:?}: {e}"));
 
-        let listing = match (fields.next(), fields.next()) {
-            (Some(display_name), Some(description)) => Some(Listing {
-                display_name,
-                description,
-            }),
-            (None, _) => None,
-            _ => panic!("package listing in packages.txt needs a description: {line:?}"),
-        };
-
-        packages.push(VendoredPackage { spec, listing });
+        packages.push(VendoredPackage { spec });
     }
     packages
 }
@@ -78,13 +52,6 @@ pub(crate) fn parse_package_list(list: &'static str) -> Vec<VendoredPackage> {
 /// Parses the package list eagerly so a malformed entry fails at startup.
 pub fn force_loaded() {
     LazyLock::force(&VENDORED);
-}
-
-/// Packages advertised by `/typstpackages`, in the order they are listed.
-pub fn listed() -> impl Iterator<Item = (&'static VendoredPackage, &'static Listing)> {
-    VENDORED
-        .iter()
-        .filter_map(|p| p.listing.as_ref().map(|l| (p, l)))
 }
 
 /// Serves the packages vendored into `packages/` and nothing else.
