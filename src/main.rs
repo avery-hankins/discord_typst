@@ -1,3 +1,4 @@
+mod packages;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,7 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 struct TypstModal {
     #[name = "Typst code"]
     #[paragraph]
+    #[placeholder = "$sum_(k=1)^oo k = -1/12$"]
     code: String,
 }
 
@@ -193,6 +195,8 @@ fn error_reply(err: &CompileError) -> poise::CreateReply {
 fn main() {
     // warm fonts in each subprocess
     LazyLock::force(&FONTS);
+    // decide package supplier success/error at startup
+    packages::force_loaded();
 
     // start point for spawned processes. created in non-async func to avoid multiple tokio runtimes
     // being created.

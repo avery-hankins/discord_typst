@@ -1,3 +1,4 @@
+use crate::packages::{self, VENDORED};
 use crate::render::{
     CompileError, FRONTMATTER_LINES, PAGE_FRONTMATTER, choose_ppi,
     compile_in_subprocess_with_timeout, compile_typst,
@@ -9,6 +10,24 @@ procspawn::enable_test_support!();
 /// Compiles user code wrapped in our frontmatter, like the real handlers do.
 fn compile(code: &str) -> Result<Vec<u8>, CompileError> {
     compile_typst(&format!("{PAGE_FRONTMATTER}\n{code}"))
+}
+
+/// Missing packages surface from the resolver as a bare "file not found",
+/// so check up front to point at the fix.
+fn assert_all_vendored() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packages");
+    for package in VENDORED.iter() {
+        let spec = &package.spec;
+        let manifest = root
+            .join(spec.namespace.as_str())
+            .join(spec.name.as_str())
+            .join(spec.version.to_string())
+            .join("typst.toml");
+        assert!(
+            manifest.exists(),
+            "{spec} is listed but not vendored; run scripts/vendor-packages.sh"
+        );
+    }
 }
 
 #[test]
@@ -122,8 +141,8 @@ fn strip_code_block_single_line_block_keeps_content() {
     assert_eq!(strip_code_block("```$x^2$```"), "$x^2$");
 }
 
-// SANDBOX guards: untrusted code must not reach the filesystem or network.
-// Each should be rejected as a *user* error, never a successful render
+// SANDBOX guards: untrusted code may reach the package registry and nothing
+// else. Each should be rejected as a *user* error, never a successful render
 // and never an internal error leaked to the user.
 
 #[test]
@@ -137,13 +156,110 @@ fn rejects_file_read() {
     }
 }
 
+/// Only `@preview` is downloadable, so any other namespace must fail without
+/// touching the network - `@local` in particular would otherwise be a path
+/// into the host's package directory.
 #[test]
-fn rejects_package_import() {
-    match compile(r#"#import "@preview/cetz:0.2.0": *"#) {
+fn rejects_non_preview_namespace() {
+    match compile(r#"#import "@local/anything:1.0.0": *"#) {
         Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
         other => panic!(
-            "expected sandbox to reject package import, got {:?}",
+            "expected sandbox to reject non-preview namespace, got {:?}",
             other.is_ok()
         ),
     }
+}
+
+/// Vendored packages must resolve from disk, which is what keeps the common
+/// imports off the network. Resolver order does the work; this pins the two
+/// halves of it together.
+#[test]
+fn listed_packages_resolve_without_the_network() {
+    for package in VENDORED.iter() {
+        assert!(
+            packages::is_vendored(&package.spec),
+            "{} is advertised but would be downloaded",
+            package.spec
+        );
+    }
+}
+
+/// Every advertised package must actually render, which also exercises the
+/// transitive dependencies they pull in.
+#[test]
+fn listed_packages_render() {
+    assert_all_vendored();
+
+    let cases = [
+        (
+            "cetz",
+            r#"#import "@preview/cetz:0.5.2": canvas, draw
+#canvas({ draw.circle((0, 0), radius: 1) })"#,
+        ),
+        (
+            "fletcher",
+            r#"#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge
+#diagram(node((0, 0), $A$), edge("->"), node((1, 0), $B$))"#,
+        ),
+        (
+            "lilaq",
+            r#"#import "@preview/lilaq:0.6.0" as lq
+#lq.diagram(lq.plot((1, 2, 3), (1, 4, 9)))"#,
+        ),
+    ];
+
+    for (name, code) in cases {
+        if let Err(e) = compile(code) {
+            panic!("{name} failed to render: {e:?}");
+        }
+    }
+}
+
+/// The package list and the vendored tree are edited separately; a listed
+/// package with no files on disk only fails at render time otherwise.
+#[test]
+fn every_listed_package_is_vendored() {
+    assert_all_vendored();
+}
+
+// Network tests: these hit packages.typst.org, so they are not part of the
+// default run. CI runs them via `cargo test -- --include-ignored`.
+
+/// A package that isn't vendored has to come off the registry.
+#[test]
+#[ignore = "requires network"]
+fn downloads_unvendored_package() {
+    let code = r#"#import "@preview/physica:0.9.5": *
+$ grad f $"#;
+    if let Err(e) = compile(code) {
+        panic!("expected registry fallback to render, got {e:?}");
+    }
+}
+
+/// A package that doesn't exist should come back as a user error, not a crash
+/// or an internal error.
+#[test]
+#[ignore = "requires network"]
+fn rejects_package_missing_from_registry() {
+    match compile(r#"#import "@preview/definitely-not-a-package:1.0.0": *"#) {
+        Err(CompileError::Source(msg)) => assert!(!msg.is_empty()),
+        other => panic!("expected a user-facing error, got {:?}", other.is_ok()),
+    }
+}
+
+#[test]
+fn package_list_separates_listed_packages_from_dependencies() {
+    let parsed = packages::parse_package_list(
+        "# comment
+
+@preview/cetz:0.5.2 | CeTZ | drawing
+@preview/oxifmt:1.0.0
+",
+    );
+    let mut parsed = parsed.into_iter();
+
+    parsed.next().expect("cetz parsed");
+    parsed.next().expect("oxifmt parsed");
+
+    assert!(parsed.next().is_none(), "comments and blanks are skipped");
 }
